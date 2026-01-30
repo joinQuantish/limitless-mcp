@@ -1,0 +1,361 @@
+// Limitless MCP Database Schema
+// For Limitless Exchange prediction markets on Base
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================
+// USER & AUTHENTICATION
+// ============================================
+
+model User {
+  id                String   @id @default(uuid())
+  externalId        String   // Developer's user identifier (unique per platform)
+
+  // Platform (optional - null for direct Quantish users)
+  platformId        String?
+  platform          Platform? @relation(fields: [platformId], references: [id])
+
+  // Base Wallet Info (EVM)
+  walletAddress     String?  @unique  // Checksummed Ethereum address (0x...)
+  encryptedPrivateKey String? // AES-256-GCM encrypted private key (for generated wallets)
+
+  // Imported Wallet (BYO - Bring Your Own)
+  importedWalletAddress   String?  @unique
+  importedWalletEncrypted String?  // User-encrypted private key blob (we never see raw key)
+  importedWalletSalt      String?  // Salt for key derivation
+  importedWalletIv        String?  // IV for decryption
+  walletImportedAt        DateTime?
+
+  // Limitless Session
+  limitlessSession  String?  // Encrypted session cookie
+  sessionExpiry     DateTime?
+  limitlessUserId   Int?     // Limitless API user ID (ownerId for orders)
+  limitlessFeeRate  Int?     // Fee rate in basis points from user rank
+
+  // API Keys for this user
+  apiKeys           UserApiKey[]
+
+  // Activity
+  orders            Order[]
+  positions         Position[]
+  activityLogs      ActivityLog[]
+
+  // Status
+  status            UserStatus @default(CREATED)
+
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  // Platform-scoped externalId uniqueness (same externalId allowed across platforms)
+  @@unique([platformId, externalId], name: "platform_externalId")
+  @@index([externalId])
+  @@index([walletAddress])
+  @@index([importedWalletAddress])
+  @@index([platformId])
+}
+
+enum UserStatus {
+  CREATED     // Just created, no wallet yet
+  READY       // Wallet generated/imported, ready to trade
+  SUSPENDED   // Temporarily disabled
+}
+
+model UserApiKey {
+  id              String   @id @default(uuid())
+  userId          String
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  keyHash         String   @unique  // SHA-256 hash of API key
+  keyPrefix       String            // First 12 chars for identification (pk_limitless_...)
+  encryptedSecret String?           // AES-256-GCM encrypted secret for HMAC signing
+
+  name            String?           // Friendly name
+  lastUsedAt      DateTime?
+  expiresAt       DateTime?
+  isActive        Boolean  @default(true)
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([keyHash])
+  @@index([userId])
+}
+
+// ============================================
+// ACCESS CONTROL
+// ============================================
+
+model AccessCode {
+  id                      String    @id @default(uuid())
+  code                    String    @unique  // Format: LMT-XXXX-XXXX-XXXX
+
+  developerName           String?
+  developerEmail          String?
+  notes                   String?
+
+  maxUses                 Int       @default(1)
+  currentUses             Int       @default(0)
+  expiresAt               DateTime?
+  isActive                Boolean   @default(true)
+
+  // Type of access code
+  forPlatformRegistration Boolean   @default(false) // true = for platform registration
+
+  createdBy               String?
+  createdAt               DateTime  @default(now())
+  updatedAt               DateTime  @updatedAt
+
+  @@index([code])
+  @@index([isActive])
+  @@index([forPlatformRegistration])
+}
+
+// ============================================
+// TRADING
+// ============================================
+
+model Order {
+  id              String   @id @default(uuid())
+  userId          String
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Limitless order info
+  limitlessOrderId String?  @unique  // Order ID from Limitless API
+  marketSlug      String             // Market slug/identifier
+  tokenId         String             // Token ID (YES or NO outcome)
+
+  // Venue info (dynamic per market)
+  venueExchange   String             // Contract address for this market's venue
+  venueAdapter    String?            // Adapter address for NegRisk markets
+
+  // Order details
+  side            OrderSide
+  orderType       OrderType @default(GTC)
+  price           Decimal   @db.Decimal(10, 4)  // Price (0.01-0.99)
+  size            Decimal   @db.Decimal(20, 6)  // Number of shares
+
+  // Amounts (scaled by 1e6 for USDC)
+  makerAmount     String    // USDC amount in raw units
+  takerAmount     String    // Shares amount in raw units
+
+  // Execution
+  filledSize      Decimal   @default(0) @db.Decimal(20, 6)
+  avgPrice        Decimal?  @db.Decimal(10, 4)
+
+  // Signature
+  signature       String?   // EIP-712 signature
+  salt            String?   // Order salt (unique nonce)
+
+  // Transaction (for on-chain orders)
+  txHash          String?   // Base transaction hash
+
+  // Status
+  status          OrderStatus @default(PENDING)
+  errorMessage    String?
+
+  // Timestamps
+  executedAt      DateTime?
+  expiresAt       DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@index([userId])
+  @@index([status])
+  @@index([marketSlug])
+}
+
+model Position {
+  id              String   @id @default(uuid())
+  userId          String
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Market info
+  marketSlug      String
+  tokenId         String             // Token ID for this outcome
+  outcomeSide     String             // "YES" or "NO"
+
+  // Position details
+  balance         Decimal  @db.Decimal(20, 6)  // Number of shares held
+  avgEntryPrice   Decimal? @db.Decimal(10, 4)
+  totalInvested   Decimal  @default(0) @db.Decimal(20, 6)
+  realizedPnl     Decimal  @default(0) @db.Decimal(20, 6)
+
+  // Current market price (cached)
+  currentPrice    Decimal? @db.Decimal(10, 4)
+  unrealizedPnl   Decimal  @default(0) @db.Decimal(20, 6)
+
+  // Market status
+  isSettled       Boolean  @default(false)
+  settlementValue Decimal? @db.Decimal(20, 6)  // Payout if won
+  isOpen          Boolean  @default(true)
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([userId, marketSlug, outcomeSide])
+  @@index([userId])
+  @@index([marketSlug])
+  @@index([isOpen])
+}
+
+// ============================================
+// MARKET CACHE
+// ============================================
+
+model MarketCache {
+  id              String    @id @default(uuid())
+  slug            String    @unique
+  title           String
+  description     String?
+
+  // Token IDs
+  yesTokenId      String?
+  noTokenId       String?
+
+  // Venue info (CRITICAL - must be dynamic per market)
+  venueExchange   String?   // verifyingContract for EIP-712
+  venueAdapter    String?   // For NegRisk sell orders
+
+  // Market type
+  marketType      String    @default("single-clob") // single-clob or group-negrisk
+
+  // Status
+  status          String    @default("active")
+
+  // Pricing (cached)
+  yesPrice        Float     @default(0.5)
+  noPrice         Float     @default(0.5)
+  volume          Float     @default(0)
+
+  lastUpdated     DateTime  @default(now())
+  createdAt       DateTime  @default(now())
+
+  @@index([status])
+  @@index([marketType])
+}
+
+// ============================================
+// LOGGING & AUDIT
+// ============================================
+
+model ActivityLog {
+  id              String   @id @default(uuid())
+  userId          String
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  action          String   // e.g., "order_placed", "wallet_imported", "position_closed"
+  resource        String   // e.g., "order", "wallet", "position"
+  resourceId      String?
+
+  details         Json?    // Additional context
+  ipAddress       String?
+  userAgent       String?
+
+  createdAt       DateTime @default(now())
+
+  @@index([userId])
+  @@index([action])
+  @@index([createdAt])
+}
+
+// ============================================
+// ENUMS
+// ============================================
+
+enum OrderSide {
+  BUY
+  SELL
+}
+
+enum OrderType {
+  GTC   // Good Till Cancelled
+  GTD   // Good Till Date
+  FOK   // Fill Or Kill
+  IOC   // Immediate Or Cancel
+}
+
+enum OrderStatus {
+  PENDING
+  OPEN
+  FILLED
+  PARTIALLY_FILLED
+  CANCELLED
+  EXPIRED
+  FAILED
+}
+
+// ============================================
+// PLATFORM / B2B PARTNER SUPPORT
+// ============================================
+
+// Platform model - B2B partners who manage their own users
+model Platform {
+  id                    String          @id @default(uuid())
+  name                  String          // Display name (e.g., "Acme Trading")
+  slug                  String          @unique // URL-friendly identifier (e.g., "acme")
+
+  // Admin Authentication
+  adminKeyHash          String          @unique // SHA-256 hash of admin API key
+  adminKeyPrefix        String          // First 12 chars for identification (plt_limitless_...)
+  encryptedAdminSecret  String?         // For optional HMAC signing (AES encrypted)
+
+  // Contact Info
+  contactEmail          String?
+  contactName           String?
+
+  // Status & Limits
+  status                PlatformStatus  @default(ACTIVE)
+  maxUsers              Int             @default(-1) // -1 = unlimited
+
+  // Timestamps
+  createdAt             DateTime        @default(now())
+  updatedAt             DateTime        @updatedAt
+
+  // Relations
+  users                 User[]
+  activityLogs          PlatformActivityLog[]
+
+  @@index([slug])
+  @@index([adminKeyPrefix])
+}
+
+enum PlatformStatus {
+  ACTIVE          // Fully operational
+  SUSPENDED       // Temporarily disabled
+  DEACTIVATED     // Permanently disabled
+}
+
+// PlatformActivityLog - audit trail for platform admin actions
+model PlatformActivityLog {
+  id              String    @id @default(uuid())
+  platformId      String
+  platform        Platform  @relation(fields: [platformId], references: [id], onDelete: Cascade)
+
+  // Action Info
+  action          String    // e.g., "user_list", "reset_api_key", "revoke_api_keys"
+  targetUserId    String?   // The user affected by this action (if any)
+
+  // Details
+  details         Json?     // Additional context
+  ipAddress       String?
+  userAgent       String?
+
+  // Status
+  success         Boolean   @default(true)
+  errorMessage    String?
+
+  // Timestamp
+  createdAt       DateTime  @default(now())
+
+  @@index([platformId])
+  @@index([action])
+  @@index([createdAt])
+  @@index([targetUserId])
+}
