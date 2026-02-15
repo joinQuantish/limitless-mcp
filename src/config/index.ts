@@ -41,7 +41,7 @@ export const config = {
 
   // Known contract addresses on Base for Limitless
   contracts: {
-    CTF: '0xC9c98965297Bc527861c898329eE280632B76E18', // Conditional Tokens Framework (ERC-1155)
+    CTF: '0xC9c98965297Bc527861c898329Ee280632B76e18', // Conditional Tokens Framework (ERC-1155)
   },
 };
 
