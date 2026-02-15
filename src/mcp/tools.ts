@@ -2239,32 +2239,68 @@ console.log(JSON.stringify(bundle, null, 2));
             isSettled: boolean;
           }> = [];
 
-          // Map CLOB positions
+          // Map CLOB positions (tokensBalance and positions data are in raw units with 6 decimals)
           for (const pos of pubPositions.clob || []) {
-            const yesBalance = parseFloat(pos.tokensBalance?.yes || '0');
-            const noBalance = parseFloat(pos.tokensBalance?.no || '0');
+            const yesBalanceRaw = parseFloat(pos.tokensBalance?.yes || '0');
+            const noBalanceRaw = parseFloat(pos.tokensBalance?.no || '0');
+            const yesBalance = yesBalanceRaw / 1e6;
+            const noBalance = noBalanceRaw / 1e6;
+            const yesData = (pos as any).positions?.yes;
+            const noData = (pos as any).positions?.no;
+            const latestTrade = (pos as any).latestTrade;
+
             if (yesBalance > 0) {
+              const fillPrice = yesData?.fillPrice ? (parseFloat(yesData.fillPrice) / 1e6) : undefined;
+              const cost = yesData?.cost ? (parseFloat(yesData.cost) / 1e6) : undefined;
+              const marketValue = yesData?.marketValue ? (parseFloat(yesData.marketValue) / 1e6) : undefined;
+              const currentPrice = latestTrade?.latestYesPrice || fillPrice;
+
               allPubPositions.push({
                 id: `${pos.market.slug}-yes`,
                 market: { slug: pos.market.slug, title: pos.market.title },
                 outcome: 'YES',
                 shares: yesBalance.toFixed(6),
-                entry: { avgPrice: 'unknown', totalInvested: 'unknown' },
-                current: { price: 'unknown', value: 'unknown' },
-                pnl: { unrealized: 'unknown', unrealizedPercent: 'unknown', realized: 'unknown' },
+                entry: {
+                  avgPrice: fillPrice ? `$${fillPrice.toFixed(4)}` : 'unknown',
+                  totalInvested: cost ? `$${cost.toFixed(4)}` : 'unknown',
+                },
+                current: {
+                  price: currentPrice ? `$${currentPrice.toFixed(4)}` : 'unknown',
+                  value: marketValue ? `$${marketValue.toFixed(4)}` : (currentPrice ? `$${(yesBalance * currentPrice).toFixed(4)}` : 'unknown'),
+                },
+                pnl: {
+                  unrealized: (marketValue && cost) ? `$${(marketValue - cost).toFixed(4)}` : 'unknown',
+                  unrealizedPercent: (marketValue && cost && cost > 0) ? `${(((marketValue - cost) / cost) * 100).toFixed(2)}%` : 'unknown',
+                  realized: yesData?.realisedPnl ? `$${(parseFloat(yesData.realisedPnl) / 1e6).toFixed(4)}` : '$0',
+                },
                 tradeType: 'clob',
                 isSettled: pos.market.status === 'resolved',
               });
             }
             if (noBalance > 0) {
+              const fillPrice = noData?.fillPrice ? (parseFloat(noData.fillPrice) / 1e6) : undefined;
+              const cost = noData?.cost ? (parseFloat(noData.cost) / 1e6) : undefined;
+              const marketValue = noData?.marketValue ? (parseFloat(noData.marketValue) / 1e6) : undefined;
+              const currentPrice = latestTrade?.latestNoPrice || fillPrice;
+
               allPubPositions.push({
                 id: `${pos.market.slug}-no`,
                 market: { slug: pos.market.slug, title: pos.market.title },
                 outcome: 'NO',
                 shares: noBalance.toFixed(6),
-                entry: { avgPrice: 'unknown', totalInvested: 'unknown' },
-                current: { price: 'unknown', value: 'unknown' },
-                pnl: { unrealized: 'unknown', unrealizedPercent: 'unknown', realized: 'unknown' },
+                entry: {
+                  avgPrice: fillPrice ? `$${fillPrice.toFixed(4)}` : 'unknown',
+                  totalInvested: cost ? `$${cost.toFixed(4)}` : 'unknown',
+                },
+                current: {
+                  price: currentPrice ? `$${currentPrice.toFixed(4)}` : 'unknown',
+                  value: marketValue ? `$${marketValue.toFixed(4)}` : (currentPrice ? `$${(noBalance * currentPrice).toFixed(4)}` : 'unknown'),
+                },
+                pnl: {
+                  unrealized: (marketValue && cost) ? `$${(marketValue - cost).toFixed(4)}` : 'unknown',
+                  unrealizedPercent: (marketValue && cost && cost > 0) ? `${(((marketValue - cost) / cost) * 100).toFixed(2)}%` : 'unknown',
+                  realized: noData?.realisedPnl ? `$${(parseFloat(noData.realisedPnl) / 1e6).toFixed(4)}` : '$0',
+                },
                 tradeType: 'clob',
                 isSettled: pos.market.status === 'resolved',
               });
