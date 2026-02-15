@@ -2198,22 +2198,101 @@ console.log(JSON.stringify(bundle, null, 2));
       lastUpdated: pos.lastUpdated.toISOString(),
     }));
 
+    // If API returned positions, return them
+    if (formattedPositions.length > 0) {
+      return {
+        positions: formattedPositions,
+        summary: {
+          totalPositions: filteredPositions.length,
+          totalValue: `$${parseFloat(summary.totalValue).toFixed(2)}`,
+          totalInvested: `$${parseFloat(summary.totalInvested).toFixed(2)}`,
+          unrealizedPnl: `$${parseFloat(summary.totalUnrealizedPnl).toFixed(2)}`,
+          realizedPnl: `$${parseFloat(summary.totalRealizedPnl).toFixed(2)}`,
+          activeMarkets: summary.activeMarkets,
+        },
+        filters: {
+          includeSettled: includeSettled || false,
+        },
+        source: 'api',
+        note: 'Positions reflect current market prices. Use limitless_sync_positions to refresh.',
+      };
+    }
+
+    // Fallback: API returned empty, try on-chain shares
+    try {
+      const onChainResult = await portfolioService.getOnChainShares(userId);
+
+      if (onChainResult.shares.length > 0) {
+        const onChainPositions = onChainResult.shares
+          .filter((s) => s.balanceFormatted > 0)
+          .map((s) => ({
+            id: s.tokenId,
+            market: {
+              slug: s.market?.slug || 'unknown',
+              title: s.market?.title || `Token ${s.tokenId.slice(0, 8)}...`,
+            },
+            outcome: s.market?.outcome || 'unknown',
+            shares: s.balanceFormatted.toString(),
+            entry: {
+              avgPrice: 'unknown',
+              totalInvested: 'unknown',
+            },
+            current: {
+              price: s.market?.currentPrice?.toString() || 'unknown',
+              value: s.market?.currentPrice
+                ? `$${(s.balanceFormatted * s.market.currentPrice).toFixed(4)}`
+                : 'unknown',
+            },
+            pnl: {
+              unrealized: 'unknown',
+              unrealizedPercent: 'unknown',
+              realized: 'unknown',
+            },
+            tradeType: 'on-chain',
+            isSettled: s.market?.status === 'resolved',
+          }));
+
+        const totalValue = onChainResult.shares.reduce((sum, s) => {
+          return sum + (s.balanceFormatted * (s.market?.currentPrice || 0));
+        }, 0);
+
+        return {
+          positions: onChainPositions,
+          summary: {
+            totalPositions: onChainPositions.length,
+            totalValue: `$${totalValue.toFixed(2)}`,
+            totalInvested: 'unknown (on-chain fallback)',
+            unrealizedPnl: 'unknown',
+            realizedPnl: 'unknown',
+            activeMarkets: new Set(onChainPositions.map((p) => p.market.slug)).size,
+          },
+          filters: {
+            includeSettled: includeSettled || false,
+          },
+          source: 'on-chain',
+          note: 'Positions retrieved from on-chain data (API returned empty). Entry prices unavailable.',
+        };
+      }
+    } catch (onChainError) {
+      // On-chain fallback failed, return empty result
+      console.error('On-chain fallback failed:', onChainError);
+    }
+
     return {
-      positions: formattedPositions,
+      positions: [],
       summary: {
-        totalPositions: filteredPositions.length,
-        totalValue: `$${parseFloat(summary.totalValue).toFixed(2)}`,
-        totalInvested: `$${parseFloat(summary.totalInvested).toFixed(2)}`,
-        unrealizedPnl: `$${parseFloat(summary.totalUnrealizedPnl).toFixed(2)}`,
-        realizedPnl: `$${parseFloat(summary.totalRealizedPnl).toFixed(2)}`,
-        activeMarkets: summary.activeMarkets,
+        totalPositions: 0,
+        totalValue: '$0.00',
+        totalInvested: '$0.00',
+        unrealizedPnl: '$0.00',
+        realizedPnl: '$0.00',
+        activeMarkets: 0,
       },
       filters: {
         includeSettled: includeSettled || false,
       },
-      note: formattedPositions.length === 0
-        ? 'No positions found. Place orders with limitless_place_order to open positions.'
-        : 'Positions reflect current market prices. Use limitless_sync_positions to refresh.',
+      source: 'none',
+      note: 'No positions found. Place orders with limitless_place_order to open positions.',
     };
   }
 
