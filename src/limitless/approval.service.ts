@@ -264,8 +264,8 @@ export class LimitlessApprovalService {
 
     // Get CTF contract address from market
     // For AMM markets: market.address is the CTF contract
-    // For CLOB markets: market.address is null - CTF approval not needed for BUY orders
-    const ctfContractAddress = market.address || null;
+    // For CLOB markets: market.address is null, use the known CTF contract from config
+    const ctfContractAddress = market.address || config.contracts.CTF;
 
     // Check USDC allowance for venue.exchange
     const { approved: usdcApproved, allowance } = await this.checkUsdcAllowance(
@@ -273,17 +273,12 @@ export class LimitlessApprovalService {
       venue.exchange
     );
 
-    // Check CTF approval for venue.exchange
-    // For CLOB markets without market.address, CTF approval is only needed for SELL orders
-    // We'll mark it as approved (true) since we can't check it without the contract address
-    let ctfApproved = true;
-    if (ctfContractAddress) {
-      ctfApproved = await this.checkCtfApproval(ownerAddress, venue.exchange, ctfContractAddress);
-    }
+    // Check CTF approval for venue.exchange (required for SELL orders)
+    let ctfApproved = await this.checkCtfApproval(ownerAddress, venue.exchange, ctfContractAddress);
 
     // Check CTF approval for venue.adapter (only for NegRisk markets)
     let ctfAdapterApproved = true; // Default true if no adapter needed
-    if (isNegRisk && venue.adapter && ctfContractAddress) {
+    if (isNegRisk && venue.adapter) {
       ctfAdapterApproved = await this.checkCtfApproval(ownerAddress, venue.adapter, ctfContractAddress);
     }
 
@@ -486,7 +481,7 @@ export class LimitlessApprovalService {
     // Get market for CTF contract address
     const client = getLimitlessClient();
     const market = await client.getMarket(marketSlug);
-    const ctfContractAddress = market.address || null;
+    const ctfContractAddress = market.address || config.contracts.CTF;
 
     const result: SetApprovalsResult = {
       allSuccessful: true,
@@ -505,9 +500,8 @@ export class LimitlessApprovalService {
       }
     }
 
-    // Set CTF approval for venue.exchange if needed
-    // Skip for CLOB markets without a market.address (CTF contract)
-    if (ctfContractAddress && (force || !status.ctfApproved)) {
+    // Set CTF approval for venue.exchange if needed (required for SELL orders)
+    if (force || !status.ctfApproved) {
       result.ctfApproval = await this.setCtfApproval(
         userId,
         status.venue.exchange,
@@ -521,7 +515,7 @@ export class LimitlessApprovalService {
     }
 
     // Set CTF approval for venue.adapter if NegRisk and needed
-    if (status.isNegRisk && status.venue.adapter && ctfContractAddress && (force || !status.ctfAdapterApproved)) {
+    if (status.isNegRisk && status.venue.adapter && (force || !status.ctfAdapterApproved)) {
       result.ctfAdapterApproval = await this.setCtfApproval(
         userId,
         status.venue.adapter,

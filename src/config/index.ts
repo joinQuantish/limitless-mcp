@@ -38,6 +38,11 @@ export const config = {
     USDC: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', // USDC on Base
     WETH: '0x4200000000000000000000000000000000000006', // Wrapped ETH on Base
   },
+
+  // Known contract addresses on Base for Limitless
+  contracts: {
+    CTF: '0xC9c98965297Bc527861c898329eE280632B76E18', // Conditional Tokens Framework (ERC-1155)
+  },
 };
 
 // Validate required config
