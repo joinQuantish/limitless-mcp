@@ -768,39 +768,52 @@ export class PortfolioService {
       'function balanceOf(address account, uint256 id) view returns (uint256)',
     ], provider);
 
-    // Base has ~2s block time, 300k blocks ≈ 7 days
+    // Base has ~2s block time. Scan in 9000-block chunks (under 10k RPC limit)
     const currentBlock = await provider.getBlockNumber();
-    const fromBlock = Math.max(0, currentBlock - 300000);
+    const totalRange = 300000; // ~7 days
+    const chunkSize = 9000;
+    const fromBlock = Math.max(0, currentBlock - totalRange);
 
     // Collect unique token IDs from transfer events TO this wallet
     const tokenIds = new Set<string>();
 
-    try {
-      const singleFilter = ctfContract.filters.TransferSingle(null, null, walletAddress);
-      const singleEvents = await ctfContract.queryFilter(singleFilter, fromBlock, currentBlock);
-      for (const event of singleEvents) {
-        const parsed = event as ethers.EventLog;
-        if (parsed.args) {
-          tokenIds.add(parsed.args[3].toString()); // id is 4th arg
-        }
-      }
-    } catch (error) {
-      console.warn('Error querying TransferSingle events:', error);
-    }
+    // Scan in chunks to avoid RPC block range limits
+    for (let start = fromBlock; start < currentBlock; start += chunkSize) {
+      const end = Math.min(start + chunkSize - 1, currentBlock);
 
-    try {
-      const batchFilter = ctfContract.filters.TransferBatch(null, null, walletAddress);
-      const batchEvents = await ctfContract.queryFilter(batchFilter, fromBlock, currentBlock);
-      for (const event of batchEvents) {
-        const parsed = event as ethers.EventLog;
-        if (parsed.args && parsed.args[3]) {
-          for (const id of parsed.args[3]) {
-            tokenIds.add(id.toString());
+      try {
+        const singleFilter = ctfContract.filters.TransferSingle(null, null, walletAddress);
+        const singleEvents = await ctfContract.queryFilter(singleFilter, start, end);
+        for (const event of singleEvents) {
+          const parsed = event as ethers.EventLog;
+          if (parsed.args) {
+            tokenIds.add(parsed.args[3].toString()); // id is 4th arg
           }
         }
+      } catch (error) {
+        console.warn(`Error querying TransferSingle events (blocks ${start}-${end}):`, error);
       }
-    } catch (error) {
-      console.warn('Error querying TransferBatch events:', error);
+
+      try {
+        const batchFilter = ctfContract.filters.TransferBatch(null, null, walletAddress);
+        const batchEvents = await ctfContract.queryFilter(batchFilter, start, end);
+        for (const event of batchEvents) {
+          const parsed = event as ethers.EventLog;
+          if (parsed.args && parsed.args[3]) {
+            for (const id of parsed.args[3]) {
+              tokenIds.add(id.toString());
+            }
+          }
+        }
+      } catch (error) {
+        console.warn(`Error querying TransferBatch events (blocks ${start}-${end}):`, error);
+      }
+
+      // Early exit: if we found tokens, we can stop scanning older blocks
+      // (optimization for the common case)
+      if (tokenIds.size > 0 && start > currentBlock - 50000) {
+        break;
+      }
     }
 
     // Also check the public API positions for comparison

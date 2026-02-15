@@ -2218,7 +2218,100 @@ console.log(JSON.stringify(bundle, null, 2));
       };
     }
 
-    // Fallback: API returned empty, try on-chain shares
+    // Fallback 1: Try public API (fast, no blockchain needed)
+    try {
+      const walletService = getBaseWalletService();
+      const walletInfo = await walletService.getWalletInfo(userId);
+
+      if (walletInfo) {
+        const pubPositions = await portfolioService.getPublicPositions(walletInfo.address);
+
+        if (pubPositions) {
+          const allPubPositions: Array<{
+            id: string;
+            market: { slug: string; title: string };
+            outcome: string;
+            shares: string;
+            entry: { avgPrice: string; totalInvested: string };
+            current: { price: string; value: string };
+            pnl: { unrealized: string; unrealizedPercent: string; realized: string };
+            tradeType: string;
+            isSettled: boolean;
+          }> = [];
+
+          // Map CLOB positions
+          for (const pos of pubPositions.clob || []) {
+            const yesBalance = parseFloat(pos.tokensBalance?.yes || '0');
+            const noBalance = parseFloat(pos.tokensBalance?.no || '0');
+            if (yesBalance > 0) {
+              allPubPositions.push({
+                id: `${pos.market.slug}-yes`,
+                market: { slug: pos.market.slug, title: pos.market.title },
+                outcome: 'YES',
+                shares: yesBalance.toFixed(6),
+                entry: { avgPrice: 'unknown', totalInvested: 'unknown' },
+                current: { price: 'unknown', value: 'unknown' },
+                pnl: { unrealized: 'unknown', unrealizedPercent: 'unknown', realized: 'unknown' },
+                tradeType: 'clob',
+                isSettled: pos.market.status === 'resolved',
+              });
+            }
+            if (noBalance > 0) {
+              allPubPositions.push({
+                id: `${pos.market.slug}-no`,
+                market: { slug: pos.market.slug, title: pos.market.title },
+                outcome: 'NO',
+                shares: noBalance.toFixed(6),
+                entry: { avgPrice: 'unknown', totalInvested: 'unknown' },
+                current: { price: 'unknown', value: 'unknown' },
+                pnl: { unrealized: 'unknown', unrealizedPercent: 'unknown', realized: 'unknown' },
+                tradeType: 'clob',
+                isSettled: pos.market.status === 'resolved',
+              });
+            }
+          }
+
+          // Map AMM positions
+          for (const pos of pubPositions.amm || []) {
+            const amount = parseFloat(pos.outcomeTokenAmount || '0');
+            if (amount > 0) {
+              allPubPositions.push({
+                id: `${pos.market.slug}-amm`,
+                market: { slug: pos.market.slug, title: pos.market.title },
+                outcome: pos.outcomeIndex === 0 ? 'YES' : 'NO',
+                shares: amount.toFixed(6),
+                entry: { avgPrice: pos.averageFillPrice || 'unknown', totalInvested: 'unknown' },
+                current: { price: 'unknown', value: 'unknown' },
+                pnl: { unrealized: pos.unrealizedPnl || 'unknown', unrealizedPercent: 'unknown', realized: 'unknown' },
+                tradeType: 'amm',
+                isSettled: pos.market.status === 'resolved',
+              });
+            }
+          }
+
+          if (allPubPositions.length > 0) {
+            return {
+              positions: allPubPositions,
+              summary: {
+                totalPositions: allPubPositions.length,
+                totalValue: 'unknown',
+                totalInvested: 'unknown',
+                unrealizedPnl: 'unknown',
+                realizedPnl: 'unknown',
+                activeMarkets: new Set(allPubPositions.map((p) => p.market.slug)).size,
+              },
+              filters: { includeSettled: includeSettled || false },
+              source: 'public-api',
+              note: 'Positions retrieved from public API (no session auth). Entry prices may be limited.',
+            };
+          }
+        }
+      }
+    } catch (pubError) {
+      console.error('Public API fallback failed:', pubError);
+    }
+
+    // Fallback 2: Try on-chain shares (slowest, but most reliable)
     try {
       const onChainResult = await portfolioService.getOnChainShares(userId);
 
@@ -2233,21 +2326,14 @@ console.log(JSON.stringify(bundle, null, 2));
             },
             outcome: s.market?.outcome || 'unknown',
             shares: s.balanceFormatted.toString(),
-            entry: {
-              avgPrice: 'unknown',
-              totalInvested: 'unknown',
-            },
+            entry: { avgPrice: 'unknown', totalInvested: 'unknown' },
             current: {
               price: s.market?.currentPrice?.toString() || 'unknown',
               value: s.market?.currentPrice
                 ? `$${(s.balanceFormatted * s.market.currentPrice).toFixed(4)}`
                 : 'unknown',
             },
-            pnl: {
-              unrealized: 'unknown',
-              unrealizedPercent: 'unknown',
-              realized: 'unknown',
-            },
+            pnl: { unrealized: 'unknown', unrealizedPercent: 'unknown', realized: 'unknown' },
             tradeType: 'on-chain',
             isSettled: s.market?.status === 'resolved',
           }));
@@ -2261,20 +2347,17 @@ console.log(JSON.stringify(bundle, null, 2));
           summary: {
             totalPositions: onChainPositions.length,
             totalValue: `$${totalValue.toFixed(2)}`,
-            totalInvested: 'unknown (on-chain fallback)',
+            totalInvested: 'unknown',
             unrealizedPnl: 'unknown',
             realizedPnl: 'unknown',
             activeMarkets: new Set(onChainPositions.map((p) => p.market.slug)).size,
           },
-          filters: {
-            includeSettled: includeSettled || false,
-          },
+          filters: { includeSettled: includeSettled || false },
           source: 'on-chain',
-          note: 'Positions retrieved from on-chain data (API returned empty). Entry prices unavailable.',
+          note: 'Positions retrieved from on-chain data. Entry prices unavailable.',
         };
       }
     } catch (onChainError) {
-      // On-chain fallback failed, return empty result
       console.error('On-chain fallback failed:', onChainError);
     }
 
