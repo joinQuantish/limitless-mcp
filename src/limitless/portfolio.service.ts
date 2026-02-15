@@ -9,8 +9,11 @@
  */
 
 import { Decimal } from '@prisma/client/runtime/library';
+import { ethers, Contract } from 'ethers';
 import { getPrismaClient } from '../db/index.js';
 import { getLimitlessClient, type Market } from './client.js';
+import { getBaseWalletService } from '../wallet/base-wallet.service.js';
+import { config } from '../config/index.js';
 
 // ============================================
 // TYPE DEFINITIONS (from Limitless API)
@@ -705,6 +708,349 @@ export class PortfolioService {
       positionCount: positions.length,
       activeMarkets: marketSlugs.size,
     };
+  }
+
+  // ============================================
+  // ON-CHAIN POSITION TRACKING
+  // ============================================
+
+  private provider: ethers.JsonRpcProvider | null = null;
+
+  private getProvider(): ethers.JsonRpcProvider {
+    if (!this.provider) {
+      this.provider = new ethers.JsonRpcProvider(config.base.rpcUrl, {
+        chainId: config.base.chainId,
+        name: 'base',
+      });
+    }
+    return this.provider;
+  }
+
+  /**
+   * Get on-chain ERC-1155 shares by scanning transfer events on Base.
+   * This bypasses the Limitless API and reads directly from the blockchain.
+   * Discovers tokens even if the API doesn't track them.
+   *
+   * @param userId - Database user ID
+   * @returns On-chain shares with market mapping
+   */
+  async getOnChainShares(userId: string): Promise<{
+    walletAddress: string;
+    shares: Array<{
+      tokenId: string;
+      balance: string;
+      balanceFormatted: number;
+      market?: {
+        slug: string;
+        title: string;
+        outcome: 'YES' | 'NO' | 'UNKNOWN';
+        currentPrice?: number;
+        status?: string;
+      };
+      inApiPositions: boolean;
+    }>;
+    totalShares: number;
+    note: string;
+  }> {
+    const walletService = getBaseWalletService();
+    const walletInfo = await walletService.getWalletInfo(userId);
+    if (!walletInfo) {
+      throw new Error('No wallet found for user. Create or import a wallet first.');
+    }
+
+    const walletAddress = walletInfo.address;
+    const provider = this.getProvider();
+    const ctfAddress = config.contracts.CTF;
+
+    const ctfContract = new Contract(ctfAddress, [
+      'event TransferSingle(address indexed operator, address indexed from, address indexed to, uint256 id, uint256 value)',
+      'event TransferBatch(address indexed operator, address indexed from, address indexed to, uint256[] ids, uint256[] values)',
+      'function balanceOf(address account, uint256 id) view returns (uint256)',
+    ], provider);
+
+    // Base has ~2s block time, 300k blocks ≈ 7 days
+    const currentBlock = await provider.getBlockNumber();
+    const fromBlock = Math.max(0, currentBlock - 300000);
+
+    // Collect unique token IDs from transfer events TO this wallet
+    const tokenIds = new Set<string>();
+
+    try {
+      const singleFilter = ctfContract.filters.TransferSingle(null, null, walletAddress);
+      const singleEvents = await ctfContract.queryFilter(singleFilter, fromBlock, currentBlock);
+      for (const event of singleEvents) {
+        const parsed = event as ethers.EventLog;
+        if (parsed.args) {
+          tokenIds.add(parsed.args[3].toString()); // id is 4th arg
+        }
+      }
+    } catch (error) {
+      console.warn('Error querying TransferSingle events:', error);
+    }
+
+    try {
+      const batchFilter = ctfContract.filters.TransferBatch(null, null, walletAddress);
+      const batchEvents = await ctfContract.queryFilter(batchFilter, fromBlock, currentBlock);
+      for (const event of batchEvents) {
+        const parsed = event as ethers.EventLog;
+        if (parsed.args && parsed.args[3]) {
+          for (const id of parsed.args[3]) {
+            tokenIds.add(id.toString());
+          }
+        }
+      }
+    } catch (error) {
+      console.warn('Error querying TransferBatch events:', error);
+    }
+
+    // Also check the public API positions for comparison
+    let apiTokenIds = new Set<string>();
+    try {
+      const pubPositions = await this.getPublicPositions(walletAddress);
+      if (pubPositions) {
+        for (const pos of pubPositions.clob || []) {
+          // CLOB positions have tokensBalance with yes/no
+          if (pos.market?.slug) {
+            const market = await this.client.getMarket(pos.market.slug).catch(() => null);
+            if (market?.yesTokenId) apiTokenIds.add(market.yesTokenId);
+            if (market?.noTokenId) apiTokenIds.add(market.noTokenId);
+          }
+        }
+      }
+    } catch (e) {
+      // Ignore API errors - on-chain is the fallback
+    }
+
+    // Check current balance for each discovered token ID
+    const shares: Array<{
+      tokenId: string;
+      balance: string;
+      balanceFormatted: number;
+      market?: {
+        slug: string;
+        title: string;
+        outcome: 'YES' | 'NO' | 'UNKNOWN';
+        currentPrice?: number;
+        status?: string;
+      };
+      inApiPositions: boolean;
+    }> = [];
+
+    for (const tokenId of tokenIds) {
+      try {
+        const balance: bigint = await ctfContract.balanceOf(walletAddress, tokenId);
+        const balanceFormatted = parseFloat(ethers.formatUnits(balance, 6));
+
+        if (balanceFormatted > 0) {
+          // Try to map token ID to a market
+          const marketInfo = await this.resolveTokenToMarket(tokenId);
+
+          shares.push({
+            tokenId,
+            balance: balance.toString(),
+            balanceFormatted,
+            market: marketInfo || undefined,
+            inApiPositions: apiTokenIds.has(tokenId),
+          });
+        }
+      } catch (e) {
+        console.warn(`Error checking balance for token ${tokenId}:`, e);
+      }
+    }
+
+    shares.sort((a, b) => b.balanceFormatted - a.balanceFormatted);
+
+    return {
+      walletAddress,
+      shares,
+      totalShares: shares.length,
+      note: shares.length === 0
+        ? 'No ERC-1155 outcome tokens found on-chain in the last ~7 days of transfers.'
+        : shares.some(s => !s.inApiPositions)
+          ? 'Found on-chain shares NOT tracked by the Limitless API! These may be from CLOB fills or transfers.'
+          : 'All on-chain shares match API positions.',
+    };
+  }
+
+  /**
+   * Check the on-chain balance of a specific token ID
+   *
+   * @param userId - Database user ID
+   * @param tokenId - The ERC-1155 token ID to check
+   * @returns Balance info with market mapping
+   */
+  async checkTokenBalance(userId: string, tokenId: string): Promise<{
+    walletAddress: string;
+    tokenId: string;
+    balance: string;
+    balanceFormatted: number;
+    market?: {
+      slug: string;
+      title: string;
+      outcome: 'YES' | 'NO' | 'UNKNOWN';
+      currentPrice?: number;
+      status?: string;
+    };
+  }> {
+    const walletService = getBaseWalletService();
+    const walletInfo = await walletService.getWalletInfo(userId);
+    if (!walletInfo) {
+      throw new Error('No wallet found for user.');
+    }
+
+    const provider = this.getProvider();
+    const ctfContract = new Contract(config.contracts.CTF, [
+      'function balanceOf(address account, uint256 id) view returns (uint256)',
+    ], provider);
+
+    const balance: bigint = await ctfContract.balanceOf(walletInfo.address, tokenId);
+    const balanceFormatted = parseFloat(ethers.formatUnits(balance, 6));
+
+    const marketInfo = await this.resolveTokenToMarket(tokenId);
+
+    return {
+      walletAddress: walletInfo.address,
+      tokenId,
+      balance: balance.toString(),
+      balanceFormatted,
+      market: marketInfo || undefined,
+    };
+  }
+
+  /**
+   * Get positions via the PUBLIC API endpoint (no auth required).
+   * Fallback for when session cookies fail.
+   *
+   * @param walletAddress - The wallet address to check
+   * @returns Positions response or null on failure
+   */
+  async getPublicPositions(walletAddress: string): Promise<PortfolioPositionsResponse | null> {
+    try {
+      const apiUrl = config.limitless.apiUrl;
+      const response = await fetch(`${apiUrl}/portfolio/${walletAddress}/positions`);
+      if (!response.ok) {
+        console.warn(`Public positions API returned ${response.status}`);
+        return null;
+      }
+      return (await response.json()) as PortfolioPositionsResponse;
+    } catch (e) {
+      console.warn('Failed to fetch public positions:', e);
+      return null;
+    }
+  }
+
+  /**
+   * Resolve a token ID to its market information.
+   * Searches active markets to find which market this token belongs to.
+   */
+  private async resolveTokenToMarket(tokenId: string): Promise<{
+    slug: string;
+    title: string;
+    outcome: 'YES' | 'NO' | 'UNKNOWN';
+    currentPrice?: number;
+    status?: string;
+  } | null> {
+    try {
+      // First check our local cache of known token→market mappings
+      const prisma = getPrismaClient();
+      const cached = await prisma.position.findFirst({
+        where: { tokenId },
+        select: { marketSlug: true, outcomeSide: true },
+      });
+
+      if (cached) {
+        try {
+          const market = await this.client.getMarket(cached.marketSlug);
+          return {
+            slug: cached.marketSlug,
+            title: market.title,
+            outcome: cached.outcomeSide as 'YES' | 'NO',
+            currentPrice: market.prices?.[cached.outcomeSide === 'YES' ? 0 : 1],
+            status: market.status,
+          };
+        } catch {
+          // Market might have been removed, fall through
+        }
+      }
+
+      // Search active markets and check token IDs
+      const markets = await this.client.getActiveMarkets(100, 1);
+      for (const market of markets) {
+        const slug = market.slug || '';
+        // Check yesTokenId / noTokenId
+        if (market.yesTokenId === tokenId) {
+          return {
+            slug,
+            title: market.title,
+            outcome: 'YES',
+            currentPrice: market.prices?.[0],
+            status: market.status,
+          };
+        }
+        if (market.noTokenId === tokenId) {
+          return {
+            slug,
+            title: market.title,
+            outcome: 'NO',
+            currentPrice: market.prices?.[1],
+            status: market.status,
+          };
+        }
+        // Check tokens array
+        if (market.tokens) {
+          for (const token of market.tokens) {
+            if (token.id === tokenId) {
+              const outcome = token.outcome?.toUpperCase() === 'YES' ? 'YES'
+                : token.outcome?.toUpperCase() === 'NO' ? 'NO' : 'UNKNOWN';
+              return {
+                slug,
+                title: market.title,
+                outcome: outcome as 'YES' | 'NO' | 'UNKNOWN',
+                currentPrice: token.price,
+                status: market.status,
+              };
+            }
+          }
+        }
+      }
+
+      // Could not resolve - return null
+      return null;
+    } catch (e) {
+      console.warn(`Failed to resolve token ${tokenId} to market:`, e);
+      return null;
+    }
+  }
+
+  /**
+   * Get positions with public API fallback.
+   * Tries authenticated endpoint first, falls back to public endpoint.
+   *
+   * @param sessionCookie - Session cookie (can be empty for fallback)
+   * @param walletAddress - Wallet address for public API fallback
+   * @returns Positions response
+   */
+  async getPositionsWithFallback(
+    sessionCookie: string | null,
+    walletAddress: string
+  ): Promise<PortfolioPositionsResponse> {
+    // Try authenticated endpoint first
+    if (sessionCookie) {
+      try {
+        return await this.getPositions(sessionCookie);
+      } catch (e) {
+        console.warn('Authenticated positions failed, trying public endpoint:', e);
+      }
+    }
+
+    // Fallback to public endpoint
+    const pubPositions = await this.getPublicPositions(walletAddress);
+    if (pubPositions) {
+      return pubPositions;
+    }
+
+    // Both failed - return empty
+    return { amm: [], clob: [], group: [] };
   }
 }
 

@@ -41,6 +41,11 @@
  * - limitless_get_portfolio_history
  * - limitless_sync_positions
  *
+ * Phase 6.5b: On-Chain Position Tracking (3 tools)
+ * - limitless_get_onchain_shares
+ * - limitless_check_token_balance
+ * - limitless_get_public_positions
+ *
  * Phase 6.6: Transfers (3 tools)
  * - limitless_send_eth
  * - limitless_send_usdc
@@ -688,6 +693,50 @@ export const limitlessTools = [
         password: {
           type: 'string',
           description: 'Password for imported wallets only (needed for session auth).',
+        },
+      },
+      required: [],
+    },
+  },
+
+  // ============================================
+  // ON-CHAIN POSITION TRACKING (Phase 6.5b)
+  // ============================================
+  {
+    name: 'limitless_get_onchain_shares',
+    description:
+      'Scan the Base blockchain directly for ERC-1155 outcome tokens held by your wallet. Finds ALL shares including those NOT tracked by the Limitless API (e.g., from CLOB fills or transfers). Maps each token to its market name and outcome (YES/NO). Use this when get_positions returns empty but you know you have positions.',
+    inputSchema: {
+      type: 'object',
+      properties: {},
+      required: [],
+    },
+  },
+  {
+    name: 'limitless_check_token_balance',
+    description:
+      'Check the on-chain balance of a specific ERC-1155 token ID on Base. Returns the exact balance and maps it to the corresponding market. Use this to verify a specific position exists on-chain.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tokenId: {
+          type: 'string',
+          description: 'The ERC-1155 token ID to check balance for',
+        },
+      },
+      required: ['tokenId'],
+    },
+  },
+  {
+    name: 'limitless_get_public_positions',
+    description:
+      'Get positions for any wallet address using the public Limitless API (no authentication required). Useful as a fallback when session-based position queries return empty, or to check any address.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        walletAddress: {
+          type: 'string',
+          description: 'Base/Ethereum wallet address (0x...) to check. If not provided, uses your own wallet address.',
         },
       },
       required: [],
@@ -2369,6 +2418,146 @@ console.log(JSON.stringify(bundle, null, 2));
         lastUpdated: pos.updatedAt.toISOString(),
       })),
       note: 'Positions synced to local database for faster access. P&L calculations use live market prices.',
+    };
+  }
+
+  // ============================================
+  // ON-CHAIN POSITION TRACKING (Phase 6.5b)
+  // ============================================
+
+  // limitless_get_onchain_shares - Scan blockchain for ERC-1155 tokens
+  if (name === 'limitless_get_onchain_shares') {
+    const portfolioService = getPortfolioService();
+
+    const result = await portfolioService.getOnChainShares(userId);
+
+    return {
+      walletAddress: result.walletAddress,
+      shares: result.shares.map((s) => ({
+        tokenId: s.tokenId,
+        balance: s.balanceFormatted,
+        balanceRaw: s.balance,
+        market: s.market
+          ? {
+              slug: s.market.slug,
+              title: s.market.title,
+              outcome: s.market.outcome,
+              currentPrice: s.market.currentPrice,
+              status: s.market.status,
+            }
+          : { note: 'Could not identify market for this token. Use the tokenId to investigate.' },
+        trackedByApi: s.inApiPositions,
+      })),
+      summary: {
+        totalTokenTypes: result.totalShares,
+        trackedByApi: result.shares.filter((s) => s.inApiPositions).length,
+        notTrackedByApi: result.shares.filter((s) => !s.inApiPositions).length,
+      },
+      contract: config.contracts.CTF,
+      chain: 'Base (chainId 8453)',
+      note: result.note,
+    };
+  }
+
+  // limitless_check_token_balance - Check balance of specific token ID
+  if (name === 'limitless_check_token_balance') {
+    const { tokenId } = args as { tokenId: string };
+
+    if (!tokenId) {
+      throw new Error('tokenId is required');
+    }
+
+    const portfolioService = getPortfolioService();
+    const result = await portfolioService.checkTokenBalance(userId, tokenId);
+
+    return {
+      walletAddress: result.walletAddress,
+      tokenId: result.tokenId,
+      balance: result.balanceFormatted,
+      balanceRaw: result.balance,
+      hasBalance: result.balanceFormatted > 0,
+      market: result.market
+        ? {
+            slug: result.market.slug,
+            title: result.market.title,
+            outcome: result.market.outcome,
+            currentPrice: result.market.currentPrice,
+            status: result.market.status,
+            estimatedValue: result.market.currentPrice
+              ? `$${(result.balanceFormatted * result.market.currentPrice).toFixed(4)}`
+              : 'unknown',
+          }
+        : null,
+      contract: config.contracts.CTF,
+      note: result.balanceFormatted > 0
+        ? `Found ${result.balanceFormatted} shares on-chain.`
+        : 'No balance found for this token ID.',
+    };
+  }
+
+  // limitless_get_public_positions - Get positions via public API (no auth)
+  if (name === 'limitless_get_public_positions') {
+    const { walletAddress: inputAddress } = args as { walletAddress?: string };
+
+    const portfolioService = getPortfolioService();
+    let address = inputAddress;
+
+    // If no address provided, use the user's own wallet
+    if (!address) {
+      const walletService = getBaseWalletService();
+      const walletInfo = await walletService.getWalletInfo(userId);
+      if (!walletInfo) {
+        throw new Error('No wallet found and no walletAddress provided.');
+      }
+      address = walletInfo.address;
+    }
+
+    const positions = await portfolioService.getPublicPositions(address);
+
+    if (!positions) {
+      return {
+        walletAddress: address,
+        positions: { amm: [], clob: [], group: [] },
+        note: 'Public positions API returned no data. Try limitless_get_onchain_shares for on-chain verification.',
+      };
+    }
+
+    // Format the response
+    const clobCount = positions.clob?.length || 0;
+    const ammCount = positions.amm?.length || 0;
+    const groupCount = positions.group?.length || 0;
+    const totalPositions = clobCount + ammCount + groupCount;
+
+    return {
+      walletAddress: address,
+      positions: {
+        clob: (positions.clob || []).map((p) => ({
+          market: { slug: p.market.slug, title: p.market.title, status: p.market.status },
+          tokensBalance: p.tokensBalance,
+          positions: p.positions,
+          liveOrders: p.orders?.liveOrders?.length || 0,
+        })),
+        amm: (positions.amm || []).map((p) => ({
+          market: { slug: p.market.slug, title: p.market.title, status: p.market.status },
+          outcome: p.outcomeIndex === 0 ? 'YES' : 'NO',
+          tokenAmount: p.outcomeTokenAmount,
+          avgFillPrice: p.averageFillPrice,
+          unrealizedPnl: p.unrealizedPnl,
+        })),
+        group: (positions.group || []).map((p) => ({
+          market: { slug: p.market.slug, title: p.market.title, status: p.market.status },
+          positions: p.positions,
+        })),
+      },
+      summary: {
+        totalPositions,
+        clobPositions: clobCount,
+        ammPositions: ammCount,
+        groupPositions: groupCount,
+      },
+      note: totalPositions === 0
+        ? 'No positions found via public API. Try limitless_get_onchain_shares for on-chain verification.'
+        : `Found ${totalPositions} positions via public API (no authentication required).`,
     };
   }
 
