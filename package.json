@@ -1,6 +1,7 @@
 {
   "name": "@quantish/limitless-server",
   "version": "1.0.0",
+  "mcpName": "io.github.joinQuantish/limitless",
   "description": "MCP server for Limitless Exchange prediction markets on Base",
   "license": "PolyForm-Noncommercial-1.0.0",
   "main": "dist/index.js",
@@ -35,6 +36,31 @@
     "prisma": "^5.22.0",
     "tsx": "^4.19.2",
     "typescript": "^5.6.3"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/joinQuantish/limitless-mcp"
+  },
+  "homepage": "https://quantish.live",
+  "keywords": [
+    "limitless",
+    "prediction-markets",
+    "base",
+    "trading",
+    "mcp",
+    "ai-agent",
+    "quantish",
+    "self-hosted"
+  ],
+  "author": "Quantish Inc. <hello@quantish.live>",
+  "files": [
+    "dist",
+    "prisma",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
   },
   "engines": {
     "node": ">=20"

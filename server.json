@@ -1,0 +1,47 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.joinQuantish/limitless",
+  "title": "Limitless MCP Server",
+  "description": "MCP server for Limitless Exchange prediction markets on Base",
+  "repository": {
+    "url": "https://github.com/joinQuantish/limitless-mcp",
+    "source": "github"
+  },
+  "version": "1.0.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@quantish/limitless-server",
+      "version": "1.0.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "DATABASE_URL",
+          "description": "PostgreSQL connection string for market data storage",
+          "isRequired": true,
+          "isSecret": true
+        },
+        {
+          "name": "ENCRYPTION_KEY",
+          "description": "AES-256 encryption key for securing wallet credentials at rest",
+          "isRequired": true,
+          "isSecret": true
+        },
+        {
+          "name": "BASE_RPC_URL",
+          "description": "Base chain RPC endpoint URL for blockchain interactions",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "PORT",
+          "description": "Port for the HTTP server",
+          "isRequired": false,
+          "isSecret": false
+        }
+      ]
+    }
+  ]
+}
