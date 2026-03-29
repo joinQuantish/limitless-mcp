@@ -11,6 +11,10 @@
 
 ---
 
+> **⚠️ Notice: Quantish is winding down.** The Quantish platform (quantish.live) is shutting down. This MCP server is self-hosted and will continue to work independently, but the Quantish team will no longer be maintaining or updating this project. If you're building in the prediction market space and need real-time data infrastructure, check out [polynode.dev](https://polynode.dev).
+
+---
+
 ## Features
 
 - **Secure Wallet Management**
